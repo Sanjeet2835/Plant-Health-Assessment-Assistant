@@ -1,0 +1,23 @@
+# Virtual environments
+venv/
+venv_cpu/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Streamlit cache
+.streamlit/
+
+# Data, weights, large files
+*.pth
+*.pt
+test_images/
+
+# Editor/OS files
+.DS_Store
+.vscode/
