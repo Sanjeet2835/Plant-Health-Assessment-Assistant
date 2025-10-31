@@ -8,97 +8,38 @@ import numpy as np
 from PIL import Image
 import streamlit as st
 from torchvision import transforms
-from langchain_google_genai import ChatGoogleGenerativeAI  # Gemini basic only
+from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
+import torch.nn as nn
+import torch.nn.functional as F
 
+# ---------- Setup ----------
+st.set_page_config(page_title="Plant Health Assistant", page_icon="🌿")
 load_dotenv()
-# ------------ Config ------------
+
 DEVICE = "cpu"
 MODEL_PATH = r"C:/Users/Sanjeet SIngh/Desktop/Projects/PlantDisease/Plant Disease Detection/plant-disease-model-complete.pth"
-# full model file
-LABELS_JSON = "class_labels.json"            # optional: list of class names
+LABELS_JSON = "class_labels.json"
 LLM_MODEL = "gemini-2.0-flash"
-# ---------------------------------
 
-# Fallback labels (use your own order if not using JSON)
-class_labels = [
-    "Tomato___Late_blight",
-    "Tomato___healthy",
-    "Grape___healthy",
-    "Orange___Haunglongbing_(Citrus_greening)",
-    "Soybean___healthy",
-    "Squash___Powdery_mildew",
-    "Potato___healthy",
-    "Corn_(maize)___Northern_Leaf_Blight",
-    "Tomato___Early_blight",
-    "Tomato___Septoria_leaf_spot",
-    "Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot",
-    "Strawberry___Leaf_scorch",
-    "Peach___healthy",
-    "Apple___Apple_scab",
-    "Tomato___Tomato_Yellow_Leaf_Curl_Virus",
-    "Tomato___Bacterial_spot",
-    "Apple___Black_rot",
-    "Blueberry___healthy",
-    "Cherry_(including_sour)___Powdery_mildew",
-    "Peach___Bacterial_spot",
-    "Apple___Cedar_apple_rust",
-    "Tomato___Target_Spot",
-    "Pepper,_bell___healthy",
-    "Grape___Leaf_blight_(Isariopsis_Leaf_Spot)",
-    "Potato___Late_blight",
-    "Tomato___Tomato_mosaic_virus",
-    "Strawberry___healthy",
-    "Apple___healthy",
-    "Grape___Black_rot",
-    "Potato___Early_blight",
-    "Cherry_(including_sour)___healthy",
-    "Corn_(maize)___Common_rust_",
-    "Grape___Esca_(Black_Measles)",
-    "Raspberry___healthy",
-    "Tomato___Leaf_Mold",
-    "Tomato___Spider_mites Two-spotted_spider_mite",
-    "Pepper,_bell___Bacterial_spot",
-    "Corn_(maize)___healthy"
-]
+# ---------- Labels ----------
+if not os.path.exists(LABELS_JSON):
+    st.error("class_labels.json not found. Please place it next to app.py.")
+    st.stop()
 
+with open(LABELS_JSON, "r", encoding="utf-8") as f:
+    class_labels = json.load(f)
 
-# Load labels from JSON if present
-if os.path.exists(LABELS_JSON):
-    try:
-        with open(LABELS_JSON, "r", encoding="utf-8") as f:
-            class_labels = json.load(f)
-    except Exception as e:
-        st.warning(f"Could not read {LABELS_JSON}: {e}. Using inline class_labels list.")
-
+# ---------- Utils ----------
 def parse_label(label: str):
     plant, status = label.split("___")
     return plant, status.replace("_", " ")
 
-# --- Gemini: basic explanation (no Wikipedia) ---
-def explain_disease(label: str) -> str:
-    plant, status = parse_label(label)
-    prompt = (
-        f"You are a plant pathology assistant. Be concise, helpful, and non-prescriptive.\n"
-        f"Explain '{status}' in {plant} leaves in 6–8 bullet points:\n"
-        f"- what it is\n- visible leaf symptoms\n"
-        f"- typical conditions\n- basic prevention/management\n"
-        f"- when to consult an expert\n"
-        f"Avoid chemical names and diagnostic claims."
-    )
-    llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0.2)
-    return llm.invoke(prompt).content
-
-
-import torch.nn as nn
-import torch.nn.functional as F
-
-# Shared helper
 def ConvBlock(in_channels, out_channels, pool=False):
     layers = [
         nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
         nn.BatchNorm2d(out_channels),
-        nn.ReLU(inplace=True)
+        nn.ReLU(inplace=True),
     ]
     if pool:
         layers.append(nn.MaxPool2d(4))
@@ -110,14 +51,14 @@ class ImageClassificationBase(nn.Module):
         out = self(images)
         loss = F.cross_entropy(out, labels)
         return loss
-    
+
     def validation_step(self, batch):
         images, labels = batch
         out = self(images)
         loss = F.cross_entropy(out, labels)
         acc = (out.argmax(dim=1) == labels).float().mean()
         return {"val_loss": loss.detach(), "val_accuracy": acc}
-    
+
     def validation_epoch_end(self, outputs):
         batch_losses = [x["val_loss"] for x in outputs]
         batch_accuracy = [x["val_accuracy"] for x in outputs]
@@ -125,22 +66,19 @@ class ImageClassificationBase(nn.Module):
         epoch_accuracy = torch.stack(batch_accuracy).mean()
         return {"val_loss": epoch_loss, "val_accuracy": epoch_accuracy}
 
-# Trained model architecture
 class ResNet9(ImageClassificationBase):
     def __init__(self, in_channels, num_diseases):
         super().__init__()
         self.conv1 = ConvBlock(in_channels, 64)
         self.conv2 = ConvBlock(64, 128, pool=True)
         self.res1 = nn.Sequential(ConvBlock(128, 128), ConvBlock(128, 128))
-
         self.conv3 = ConvBlock(128, 256, pool=True)
         self.conv4 = ConvBlock(256, 512, pool=True)
         self.res2 = nn.Sequential(ConvBlock(512, 512), ConvBlock(512, 512))
-
         self.classifier = nn.Sequential(
             nn.MaxPool2d(4),
             nn.Flatten(),
-            nn.Linear(512, num_diseases)
+            nn.Linear(512, num_diseases),
         )
 
     def forward(self, xb):
@@ -152,25 +90,20 @@ class ResNet9(ImageClassificationBase):
         out = self.res2(out) + out
         return self.classifier(out)
 
-
-
 @st.cache_resource
 def load_model():
     model = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
     model.eval().to(DEVICE)
     return model
 
-def preprocess(img):
+def preprocess(img: Image.Image):
     tfms = transforms.Compose([
-        transforms.Resize((256, 256)),  # <-- not 224, no CenterCrop
-        transforms.ToTensor(),          # <-- you trained without Normalize
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),  # match training (no normalization)
     ])
     return tfms(img.convert("RGB"))
 
-
 def predict(model, img: Image.Image, topk=3):
-    if not class_labels:
-        raise RuntimeError("class_labels is empty. Provide class_labels.json or fill the list.")
     x = preprocess(img).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
         logits = model(x)
@@ -178,11 +111,9 @@ def predict(model, img: Image.Image, topk=3):
     idxs = np.argsort(-probs)[:min(topk, len(class_labels))]
     return [(class_labels[i], float(probs[i])) for i in idxs]
 
-# -------- Streamlit UI --------
-st.set_page_config(page_title="Plant Disease Classifier", page_icon="🌿")
-st.title("🌿 Plant Disease Classifier")
-
-uploaded = st.file_uploader("Upload a leaf image", type=["jpg","png","jpeg"])
+# ---------- UI ----------
+st.title("🌿 Plant Health Assistant")
+uploaded = st.file_uploader("Upload a leaf image", type=["jpg", "png", "jpeg"])
 
 if uploaded:
     img = Image.open(uploaded)
@@ -195,7 +126,7 @@ if uploaded:
         st.error(f"Prediction error: {e}")
         st.stop()
 
-    st.subheader("Prediction:")
+    st.subheader("Prediction")
     best_label, best_prob = top[0]
     plant, status = parse_label(best_label)
 
@@ -209,9 +140,76 @@ if uploaded:
         p_plant, p_status = parse_label(label)
         st.write(f"- **{p_plant} — {p_status}** — {p:.1%}")
 
-    st.divider()
-    if st.button("Explain Disease"):
-        with st.spinner("Generating explanation..."):
-            st.write(explain_disease(best_label))
+    # =========================
+    # 🤖 Chat Assistant (inside `if uploaded:` so vars exist)
+    # =========================
+    # Reset chat when context changes
+    ctx_new = {"plant": plant, "status": status, "best_prob": float(best_prob)}
+    if "ctx" not in st.session_state or st.session_state.ctx != ctx_new:
+        st.session_state.ctx = ctx_new
+        st.session_state.chat_messages = []
+
+    st.subheader("🤖 Ask the Plant Assistant")
+    st.caption(
+        f"Context → Plant: **{plant}**, Status: **{status}**, Confidence: **{best_prob:.1%}**"
+    )
+
+    cols = st.columns([1, 1, 6])
+    with cols[0]:
+        if st.button("Clear Chat"):
+            st.session_state.chat_messages = []
+
+    # Render history
+    for msg in st.session_state.get("chat_messages", []):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat input
+    user_msg = st.chat_input("Ask about causes, prevention, care, signs to monitor, etc.")
+    if user_msg:
+        # Show user message
+        st.session_state.chat_messages.append({"role": "user", "content": user_msg})
+        with st.chat_message("user"):
+            st.markdown(user_msg)
+
+        # Build prompt with context + brief history
+        system_instructions = (
+            "You are a helpful plant health assistant. "
+            "Be concise (5–8 bullets), practical, and non-prescriptive. "
+            "Avoid recommending specific chemicals or products. "
+            "If the leaf is healthy, give general care & monitoring tips. "
+            "Always include when to consult an expert.\n\n"
+            f"Detected context:\n- Plant: {plant}\n- Status: {status}\n- Model confidence: {best_prob:.1%}\n"
+        )
+        history_text = ""
+        for m in st.session_state.chat_messages:
+            role = "User" if m["role"] == "user" else "Assistant"
+            history_text += f"{role}: {m['content']}\n"
+
+        full_prompt = (
+            system_instructions
+            + "\nConversation so far:\n"
+            + history_text
+            + "\nNow answer the last user question clearly and helpfully."
+        )
+
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model=LLM_MODEL,
+                temperature=0.2,
+                google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
+            )
+            answer = llm.invoke(full_prompt).content.strip()
+        except Exception as e:
+            answer = (
+                "I couldn't generate a response (LLM error). "
+                "Please check your API key or internet connection.\n\n"
+                f"Details: {e}"
+            )
+
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+        st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+
 else:
     st.info("Upload a clear photo of a single leaf to begin.")
