@@ -141,7 +141,7 @@ if uploaded:
         st.write(f"- **{p_plant} — {p_status}** — {p:.1%}")
 
     # =========================
-    # 🤖 Chat Assistant (inside `if uploaded:` so vars exist)
+    # 🤖 Chat Assistant
     # =========================
     # Reset chat when context changes
     ctx_new = {"plant": plant, "status": status, "best_prob": float(best_prob)}
