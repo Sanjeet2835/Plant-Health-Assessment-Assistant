@@ -12,10 +12,31 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 import torch.nn as nn
 import torch.nn.functional as F
+import json
 
-# ---------- Setup ----------
-st.set_page_config(page_title="Plant Health Assistant", page_icon="🌿")
+
+import pandas as pd
+from weather import get_15day_forecast as get_14day_forecast, flatten_forecast, WeatherError
+
 load_dotenv()
+
+# after imports + load_dotenv + st.set_page_config
+from weatherforecast_page import render as render_weather
+
+# --- Router ---
+qp = st.query_params
+if qp.get("view", "main") == "weather":
+    render_weather()   # call every run
+    st.stop()
+
+
+top_cols = st.columns([8, 2])
+with top_cols[1]:
+    if st.button("☁️ Weather", use_container_width=True):
+        st.query_params["view"] = "weather"
+        st.rerun()
+
+
 
 DEVICE = "cpu"
 MODEL_PATH = r"C:/Users/Sanjeet SIngh/Desktop/Projects/PlantDisease/Plant Disease Detection/plant-disease-model-complete.pth"
@@ -27,13 +48,29 @@ if not os.path.exists(LABELS_JSON):
     st.error("class_labels.json not found. Please place it next to app.py.")
     st.stop()
 
-with open(LABELS_JSON, "r", encoding="utf-8") as f:
-    class_labels = json.load(f)
-
 # ---------- Utils ----------
 def parse_label(label: str):
     plant, status = label.split("___")
     return plant, status.replace("_", " ")
+
+with open(LABELS_JSON, "r", encoding="utf-8") as f:
+    class_labels = json.load(f)
+
+class_to_plant = [parse_label(label)[0] for label in class_labels]
+unique_plants = sorted({p for p in class_to_plant})
+
+
+
+# class_to_plant = [parse_label(label)[0] for label in class_labels] converts :
+# [
+#   "Tomato___Early_blight",
+#   "Tomato___Late_blight",
+#   "Potato___Healthy",
+#   "Corn___Northern_Leaf_Blight"
+# ]
+# to
+# class_to_plant = ["Tomato", "Tomato", "Potato", "Corn"]
+
 
 def ConvBlock(in_channels, out_channels, pool=False):
     layers = [
@@ -89,7 +126,39 @@ class ResNet9(ImageClassificationBase):
         out = self.conv4(out)
         out = self.res2(out) + out
         return self.classifier(out)
+#----------------------------------Weather Data-----------------------------
+@st.cache_data(ttl=3600)
+def fetch_weather_rows(place: str) -> list[dict]:
+    data = get_14day_forecast(place)
+    return flatten_forecast(data)  # list of dicts (14 rows)
 
+def format_weather_text(rows: list[dict], place: str, days: int = 7) -> str:
+    """
+    Compact text for prompts: Date, condition, Tmin–Tmax °C, rain%.
+    Keep days small (5–7) to save tokens.
+    """
+    rows = rows[:days]
+    lines = []
+    for r in rows:
+        d   = r.get("Date")
+        cnd = r.get("Condition")
+        tmin = r.get("Min (°C)")
+        tmax = r.get("Max (°C)")
+        rain = r.get("Rain chance (%)")
+        lines.append(f"- {d}: {cnd}, {tmin}–{tmax}°C, rain {rain}%")
+    return f"Weather forecast for {place} (next {len(rows)} days):\n" + "\n".join(lines)
+
+def format_weather_json(rows: list[dict], place: str, days: int = 14) -> str:
+    """
+    JSON string if you prefer structured context in the prompt.
+    """
+    cols = ["Date","Condition","Min (°C)","Max (°C)","Rain chance (%)","Max wind (kph)","Avg humidity (%)","Sunrise","Sunset"]
+    slim = [{k: r.get(k) for k in cols} for r in rows[:days]]
+    return json.dumps({"location": place, "forecast": slim}, ensure_ascii=False)
+
+
+
+#--------------------------Loading Model------------------------------------
 @st.cache_resource
 def load_model():
     model = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
@@ -103,17 +172,41 @@ def preprocess(img: Image.Image):
     ])
     return tfms(img.convert("RGB"))
 
-def predict(model, img: Image.Image, topk=3):
+
+def predict(model, img: Image.Image, topk=10, selected_plant="Auto"):
     x = preprocess(img).unsqueeze(0).to(DEVICE)
     with torch.no_grad():
-        logits = model(x)
-        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        logits = model(x)  # raw scores, all plants
+
+        # ✅ Apply masking here
+        if selected_plant != "Auto":
+            mask = torch.tensor(
+                [p == selected_plant for p in class_to_plant],
+                device=logits.device
+            )
+            masked_logits = logits.clone()
+            masked_logits[:, ~mask] = float('-inf')
+        else:
+            masked_logits = logits
+
+        # ✅ Softmax AFTER masking
+        probs = torch.softmax(masked_logits, dim=1)[0].cpu().numpy()
+
     idxs = np.argsort(-probs)[:min(topk, len(class_labels))]
     return [(class_labels[i], float(probs[i])) for i in idxs]
+
 
 # ---------- UI ----------
 st.title("🌿 Plant Health Assistant")
 uploaded = st.file_uploader("Upload a leaf image", type=["jpg", "png", "jpeg"])
+
+# User chooses whether to filter prediction
+plant_choice = st.selectbox(
+        "Filter predictions to a plant (optional):",
+        ["Auto"] + unique_plants,
+        index=0
+)
+
 
 if uploaded:
     img = Image.open(uploaded)
@@ -121,7 +214,8 @@ if uploaded:
 
     model = load_model()
     try:
-        top = predict(model, img, topk=3)
+        top = predict(model, img, topk=3, selected_plant=plant_choice)
+
     except Exception as e:
         st.error(f"Prediction error: {e}")
         st.stop()
@@ -141,7 +235,7 @@ if uploaded:
         st.write(f"- **{p_plant} — {p_status}** — {p:.1%}")
 
     # =========================
-    # 🤖 Chat Assistant
+    # Chat Assistant
     # =========================
     # Reset chat when context changes
     ctx_new = {"plant": plant, "status": status, "best_prob": float(best_prob)}
@@ -159,7 +253,7 @@ if uploaded:
         if st.button("Clear Chat"):
             st.session_state.chat_messages = []
 
-    # Render history
+    # Rendering history
     for msg in st.session_state.get("chat_messages", []):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -186,6 +280,29 @@ if uploaded:
             role = "User" if m["role"] == "user" else "Assistant"
             history_text += f"{role}: {m['content']}\n"
 
+        # decide a place; you can also store user's last input in session_state
+        weather_place = st.session_state.get("weather_place", "New Delhi, IN")
+
+        try:
+            w_rows = fetch_weather_rows(weather_place)
+            weather_ctx = format_weather_text(w_rows, weather_place, days=7)   # concise text
+            # Or use JSON:
+            # weather_ctx = "WEATHER_JSON:\n" + format_weather_json(w_rows, weather_place, days=14)
+        except Exception as _:
+            weather_ctx = "Weather data unavailable."
+
+        system_instructions = (
+            "You are a helpful plant health assistant. "
+            "Be concise (5–8 bullets), practical, and non-prescriptive. "
+            "Avoid recommending specific chemicals or products. "
+            "If the leaf is healthy, give general care & monitoring tips. "
+            "Always include when to consult an expert.\n\n"
+            f"Detected context:\n- Plant: {plant}\n- Status: {status}\n- Model confidence: {best_prob:.1%}\n"
+            f"\nAdditional context:\n{weather_ctx}\n"   # <-- inject weather here
+            )
+
+        
+        
         full_prompt = (
             system_instructions
             + "\nConversation so far:\n"
