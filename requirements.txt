@@ -1,0 +1,9 @@
+streamlit
+torch
+torchvision
+pillow
+numpy
+pandas
+python-dotenv
+requests
+langchain-google-genai

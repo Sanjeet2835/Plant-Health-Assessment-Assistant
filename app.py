@@ -178,7 +178,7 @@ def predict(model, img: Image.Image, topk=10, selected_plant="Auto"):
     with torch.no_grad():
         logits = model(x)  # raw scores, all plants
 
-        # ✅ Apply masking here
+        # Apply masking here
         if selected_plant != "Auto":
             mask = torch.tensor(
                 [p == selected_plant for p in class_to_plant],
@@ -189,7 +189,7 @@ def predict(model, img: Image.Image, topk=10, selected_plant="Auto"):
         else:
             masked_logits = logits
 
-        # ✅ Softmax AFTER masking
+        # Softmax AFTER masking
         probs = torch.softmax(masked_logits, dim=1)[0].cpu().numpy()
 
     idxs = np.argsort(-probs)[:min(topk, len(class_labels))]
